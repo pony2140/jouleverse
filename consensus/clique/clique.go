@@ -565,9 +565,81 @@ func (c *Clique) Prepare(chain consensus.ChainHeaderReader, header *types.Header
 // Finalize implements consensus.Engine, ensuring no uncles are set, nor block
 // rewards given.
 func (c *Clique) Finalize(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header) {
-	// No block rewards in PoA, so the state remains as is and uncles are dropped
+	// Uncles are meaningless in PoA and are dropped. Block rewards are not:
+	// upstream Clique mints nothing at all, which makes a genesis allocation
+	// the only supply a Clique chain will ever have. Chains that want issuance
+	// proportional to block production declare it in params.RewardFor.
+	//
+	// EXPERIMENTAL: see params/blockreward.go. Zero for every production chain.
+	c.accumulateReward(chain.Config(), header, state)
 	header.Root = state.IntermediateRoot(chain.Config().IsEIP158(header.Number))
 	header.UncleHash = types.CalcUncleHash(nil)
+}
+
+// rewardPayee returns the account that should receive the block reward for the
+// given header.
+//
+// It is NOT header.Coinbase. In Clique, header.Coinbase carries the address
+// currently being voted on (or zero when there is no pending proposal), and
+// header validation actively requires it to be zero on every checkpoint block.
+// Paying header.Coinbase would send the reward to a random vote target, or to
+// the zero address, and would make the reward effectively unreachable.
+//
+// The producer is recorded only in the signature, but Finalize runs *before*
+// Seal writes it, so a locally sealing node has no signature to recover from at
+// that point. The two paths therefore differ:
+//
+//   - Local sealing: the header being finalized is our own and still unsigned.
+//     Fall back to c.signer, the address we are about to sign with.
+//   - Verification: the header arrived over the wire with a valid signature.
+//     Recover the signer from it, so that every node derives the same payee and
+//     therefore the same state root.
+//
+// Getting this wrong is silent: the block still seals, and the reward simply
+// never arrives.
+func (c *Clique) rewardPayee(header *types.Header) (common.Address, error) {
+	if signer, err := ecrecover(header, c.signatures); err == nil {
+		return signer, nil
+	}
+	c.lock.RLock()
+	signer := c.signer
+	c.lock.RUnlock()
+	if signer != (common.Address{}) {
+		return signer, nil
+	}
+	return common.Address{}, errors.New("no signer available for block reward")
+}
+
+// accumulateReward pays the scheduled block reward to the signer that produced
+// the block. See rewardPayee for why the payee is not header.Coinbase.
+func (c *Clique) accumulateReward(config *params.ChainConfig, header *types.Header, state *state.StateDB) {
+	reward := params.RewardFor(config.ChainID)
+	if reward.Amount == nil || reward.Amount.Sign() == 0 {
+		return
+	}
+	// Rewards start at block 1: the genesis block has no producer to pay.
+	if header.Number == nil || header.Number.Sign() == 0 {
+		return
+	}
+	// Cap the total issuance. The running total is derived from the height
+	// rather than stored, so this stays a pure function of the header and
+	// cannot drift between nodes.
+	amount := new(big.Int).Set(reward.Amount)
+	if reward.Cap != nil {
+		paid := new(big.Int).Mul(reward.Amount, new(big.Int).Sub(header.Number, common.Big1))
+		if paid.Cmp(reward.Cap) >= 0 {
+			return
+		}
+		if remaining := new(big.Int).Sub(reward.Cap, paid); remaining.Cmp(amount) < 0 {
+			amount = remaining
+		}
+	}
+	payee, err := c.rewardPayee(header)
+	if err != nil {
+		log.Warn("clique: cannot determine block reward payee", "number", header.Number, "err", err)
+		return
+	}
+	state.AddBalance(payee, amount)
 }
 
 // FinalizeAndAssemble implements consensus.Engine, ensuring no uncles are set,
