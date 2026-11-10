@@ -49,6 +49,17 @@ func NewEVMBlockContext(header *types.Header, chain ChainContext, author *common
 	} else {
 		beneficiary = *author
 	}
+	// The sealing engine may let the producer name a different fee recipient,
+	// carried in the header itself so that every node reads the same value from
+	// the same block. This mirrors how Author() is resolved: the engine is the
+	// only component that knows the header layout, and both the sealing path and
+	// the verification path must agree, so the lookup has to happen here rather
+	// than in the miner.
+	if engine, ok := chain.Engine().(consensus.FeeRecipientEngine); ok {
+		if recipient, override := engine.FeeRecipient(header); override {
+			beneficiary = recipient
+		}
+	}
 	if header.BaseFee != nil {
 		baseFee = new(big.Int).Set(header.BaseFee)
 	}

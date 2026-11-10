@@ -58,6 +58,24 @@ type ChainReader interface {
 	GetBlock(hash common.Hash, number uint64) *types.Block
 }
 
+// FeeRecipientEngine is an optional capability of a consensus engine that lets
+// the block producer direct the priority fee to an address of its choosing.
+//
+// This is the Clique analogue of the address a Bitcoin miner writes into its
+// coinbase output: it is chosen by the producer, it travels inside the block,
+// and every node credits it because it is covered by the seal. A node that
+// rewrote the recipient after sealing would invalidate the signature.
+//
+// It is a separate interface rather than a method on Engine so that engines
+// which do not offer the feature (ethash) and external implementers are
+// unaffected.
+type FeeRecipientEngine interface {
+	// FeeRecipient returns the address that should receive the priority fee of
+	// the given block, and whether the block specifies one at all. When the
+	// second return value is false, the fee belongs to the block signer.
+	FeeRecipient(header *types.Header) (common.Address, bool)
+}
+
 // Engine is an algorithm agnostic consensus engine.
 type Engine interface {
 	// Author retrieves the Ethereum address of the account that minted the given

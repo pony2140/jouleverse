@@ -76,6 +76,17 @@ func (beacon *Beacon) Author(header *types.Header) (common.Address, error) {
 	return header.Coinbase, nil
 }
 
+// FeeRecipient implements consensus.FeeRecipientEngine by delegating to the
+// wrapped engine. The wrapper exists to switch between pre-merge and
+// post-merge rules; on a pre-merge header the inner engine is the one that
+// interprets the header layout, so the lookup has to go there.
+func (beacon *Beacon) FeeRecipient(header *types.Header) (common.Address, bool) {
+	if engine, ok := beacon.ethone.(consensus.FeeRecipientEngine); ok {
+		return engine.FeeRecipient(header)
+	}
+	return common.Address{}, false
+}
+
 // VerifyHeader checks whether a header conforms to the consensus rules of the
 // stock Ethereum consensus engine.
 func (beacon *Beacon) VerifyHeader(chain consensus.ChainHeaderReader, header *types.Header, seal bool) error {
@@ -224,10 +235,11 @@ func (beacon *Beacon) VerifyUncles(chain consensus.ChainReader, block *types.Blo
 // verifyHeader checks whether a header conforms to the consensus rules of the
 // stock Ethereum consensus engine. The difference between the beacon and classic is
 // (a) The following fields are expected to be constants:
-//     - difficulty is expected to be 0
-// 	   - nonce is expected to be 0
-//     - unclehash is expected to be Hash(emptyHeader)
+//   - difficulty is expected to be 0
+//   - nonce is expected to be 0
+//   - unclehash is expected to be Hash(emptyHeader)
 //     to be the desired constants
+//
 // (b) we don't verify if a block is in the future anymore
 // (c) the extradata is limited to 32 bytes
 func (beacon *Beacon) verifyHeader(chain consensus.ChainHeaderReader, header, parent *types.Header) error {

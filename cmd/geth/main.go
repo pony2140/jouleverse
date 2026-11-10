@@ -131,6 +131,7 @@ var (
 		utils.MinerGasPriceFlag,
 		utils.MinerEtherbaseFlag,
 		utils.MinerExtraDataFlag,
+		utils.MinerFeeRecipientFlag,
 		utils.MinerRecommitIntervalFlag,
 		utils.MinerNoVerifyFlag,
 		utils.NATFlag,

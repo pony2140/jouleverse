@@ -474,6 +474,19 @@ func (s *Ethereum) StartMining(threads int) error {
 				return fmt.Errorf("signer missing: %v", err)
 			}
 			cli.Authorize(eb, wallet.SignData)
+
+			// The fee recipient is independent of the signing key: it needs no
+			// local account, because this node never signs with it. It is only
+			// published in the header of blocks this node seals, so a contract
+			// address works as well as an externally held one.
+			if recipient := s.config.Miner.FeeRecipient; recipient != (common.Address{}) {
+				cli.SetFeeRecipient(recipient)
+				log.Info("Block fees will be paid to the configured recipient", "recipient", recipient)
+				if !clique.EnablesFeeRecipient(s.blockchain.CurrentHeader().Number) {
+					log.Warn("Fee recipient configured but this chain does not allow it yet; fees keep going to the signer",
+						"recipient", recipient, "activation", clique.FeeRecipientActivation)
+				}
+			}
 		}
 		// If mining is started, we can disable the transaction rejection mechanism
 		// introduced to speed sync times.

@@ -545,6 +545,11 @@ var (
 		Value:    "0",
 		Category: flags.MinerCategory,
 	}
+	MinerFeeRecipientFlag = &cli.StringFlag{
+		Name:     "miner.feerecipient",
+		Usage:    "Address that receives block fees from blocks this node seals (Clique only; empty = pay the signer)",
+		Category: flags.MinerCategory,
+	}
 	MinerExtraDataFlag = &cli.StringFlag{
 		Name:     "miner.extradata",
 		Usage:    "Block extra data set by the miner (default = client version)",
@@ -1637,6 +1642,13 @@ func setMiner(ctx *cli.Context, cfg *miner.Config) {
 	cfg.NotifyFull = ctx.Bool(MinerNotifyFullFlag.Name)
 	if ctx.IsSet(MinerExtraDataFlag.Name) {
 		cfg.ExtraData = []byte(ctx.String(MinerExtraDataFlag.Name))
+	}
+	if ctx.IsSet(MinerFeeRecipientFlag.Name) {
+		addr := ctx.String(MinerFeeRecipientFlag.Name)
+		if !common.IsHexAddress(addr) {
+			Fatalf("Invalid fee recipient address: %q", addr)
+		}
+		cfg.FeeRecipient = common.HexToAddress(addr)
 	}
 	if ctx.IsSet(MinerGasLimitFlag.Name) {
 		cfg.GasCeil = ctx.Uint64(MinerGasLimitFlag.Name)

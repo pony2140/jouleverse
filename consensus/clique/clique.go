@@ -113,6 +113,11 @@ var (
 	// errInvalidMixDigest is returned if a block's mix digest is non-zero.
 	errInvalidMixDigest = errors.New("non-zero mix digest")
 
+	// errInvalidFeeRecipient is returned if a block carries a fee recipient in
+	// the reserved field but the field above the address is not zero, which
+	// would make the field ambiguous.
+	errInvalidFeeRecipient = errors.New("non-zero fee recipient padding")
+
 	// errInvalidUncleHash is returned if a block contains an non-empty uncle list.
 	errInvalidUncleHash = errors.New("non empty uncle hash")
 
@@ -182,6 +187,11 @@ type Clique struct {
 	signFn SignerFn       // Signer function to authorize hashes with
 	lock   sync.RWMutex   // Protects the signer and proposals fields
 
+	// feeRecipient is the address this node wants block fees paid to. It is
+	// published in every block this node seals, and other nodes credit it
+	// because it is covered by the seal. Empty means "pay the signer".
+	feeRecipient common.Address
+
 	// The fields below are for testing only
 	fakeDiff bool // Skip difficulty verifications
 }
@@ -205,6 +215,35 @@ func New(config *params.CliqueConfig, db ethdb.Database) *Clique {
 		signatures: signatures,
 		proposals:  make(map[common.Address]bool),
 	}
+}
+
+// FeeRecipient implements consensus.FeeRecipientEngine, returning the address
+// that should receive this block's priority fee.
+//
+// Clique cannot use header.Coinbase for this: the field carries the current
+// vote target, must be zero when there is no pending proposal, and is forced to
+// zero on checkpoint blocks. The recipient therefore travels in the 32-byte
+// field the header already reserves, whose high 12 bytes are required to be
+// zero so that the field stays unambiguous.
+//
+// The value is covered by the seal (CliqueRLP includes it), so a relay cannot
+// change it without invalidating the signature. That is the property borrowed
+// from a Bitcoin coinbase: the producer picks the address, but the choice is
+// bound to the block that carries it.
+func (c *Clique) FeeRecipient(header *types.Header) (common.Address, bool) {
+	if !EnablesFeeRecipient(header.Number) {
+		return common.Address{}, false
+	}
+	var padding [12]byte
+	if !bytes.Equal(header.MixDigest[:12], padding[:]) {
+		return common.Address{}, false
+	}
+	var recipient common.Address
+	copy(recipient[:], header.MixDigest[12:])
+	if recipient == (common.Address{}) {
+		return common.Address{}, false
+	}
+	return recipient, true
 }
 
 // Author implements consensus.Engine, returning the Ethereum address recovered
@@ -280,9 +319,18 @@ func (c *Clique) verifyHeader(chain consensus.ChainHeaderReader, header *types.H
 	if checkpoint && signersBytes%common.AddressLength != 0 {
 		return errInvalidCheckpointSigners
 	}
-	// Ensure that the mix digest is zero as we don't have fork protection currently
+	// The field is reserved and upstream Clique requires it to be zero. A block
+	// may use it to name a fee recipient, but only once the feature is active
+	// for this height and only with the padding bytes clear, so the value cannot
+	// be confused with a fork-protection marker.
 	if header.MixDigest != (common.Hash{}) {
-		return errInvalidMixDigest
+		if !EnablesFeeRecipient(header.Number) {
+			return errInvalidMixDigest
+		}
+		var padding [12]byte
+		if !bytes.Equal(header.MixDigest[:12], padding[:]) {
+			return errInvalidFeeRecipient
+		}
 	}
 	// Ensure that the block doesn't contain any uncles which are meaningless in PoA
 	if header.UncleHash != uncleHash {
@@ -547,8 +595,13 @@ func (c *Clique) Prepare(chain consensus.ChainHeaderReader, header *types.Header
 	}
 	header.Extra = append(header.Extra, make([]byte, extraSeal)...)
 
-	// Mix digest is reserved for now, set to empty
+	// The header reserves this field and upstream Clique requires it to be zero.
+	// We use it to publish the address this signer wants its fees paid to: 12
+	// zero bytes of padding followed by a 20-byte address.
 	header.MixDigest = common.Hash{}
+	if EnablesFeeRecipient(header.Number) && c.feeRecipient != (common.Address{}) {
+		copy(header.MixDigest[12:], c.feeRecipient[:])
+	}
 
 	// Ensure the timestamp has the correct delay
 	parent := chain.GetHeader(header.ParentHash, number-1)
@@ -578,6 +631,32 @@ func (c *Clique) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *
 
 	// Assemble and return the final block for sealing
 	return types.NewBlock(header, txs, nil, receipts, trie.NewStackTrie(nil)), nil
+}
+
+// SetFeeRecipient configures the address this node wants block fees paid to.
+// The empty address restores the default of paying the signer.
+//
+// This is deliberately a property of the local node, not of the chain: it only
+// affects blocks this node seals. Other nodes accept the choice because it is
+// inside the sealed header, exactly as they accept whatever coinbase address a
+// Bitcoin miner puts in its coinbase transaction. No coordination, no vote, no
+// genesis change.
+//
+// It does not take effect until EnablesFeeRecipient reports true for the block
+// being sealed, so a node that sets it on a chain where the feature is not
+// active simply keeps paying itself and keeps producing valid blocks.
+func (c *Clique) SetFeeRecipient(recipient common.Address) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	c.feeRecipient = recipient
+}
+
+// FeeRecipientAddress returns the recipient currently configured for blocks
+// this node seals.
+func (c *Clique) FeeRecipientAddress() common.Address {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+	return c.feeRecipient
 }
 
 // Authorize injects a private key into the consensus engine to mint new blocks
